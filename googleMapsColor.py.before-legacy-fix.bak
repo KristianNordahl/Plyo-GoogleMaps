@@ -1,0 +1,608 @@
+'''
+Demonstrates how to create a non-dockable QDialog with PySide2 for use in 3ds Max with buttons, sliders, spinners, a square color picker, and a grid of spinners
+'''
+
+try:
+    from PySide6 import QtWidgets, QtCore, QtGui
+except ImportError:
+    from PySide2 import QtWidgets, QtCore, QtGui
+import qtmax
+from pymxs import runtime as rt
+
+__version__ = "1.0.0"
+
+class PyMaxDockWidget(QtWidgets.QDialog):
+    def __init__(self, parent=None):
+        super(PyMaxDockWidget, self).__init__(parent)
+        self.current_color = QtGui.QColor(255, 255, 255)
+        # Controller references
+        self.hue_ctrl = None
+        self.sat_ctrl = None
+        self.tint_ctrl = None
+        self.strength_ctrl = None
+        self.gain_ctrls = []
+        self.gamma_ctrls = []
+        self.pivot_ctrls = []
+        self.lift_ctrls = []
+
+        self.setWindowFlags(QtCore.Qt.Tool)
+        self.setWindowTitle('Plyo Google Maps Color')
+        self.initUI()
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
+        qtmax.DisableMaxAcceleratorsOnFocus(self, True)
+
+    def initUI(self):
+        main_layout = QtWidgets.QVBoxLayout()
+
+        # --- Version Label ---
+        self.version_label = QtWidgets.QLabel(f"Version {__version__}")
+        self.version_label.setAlignment(QtCore.Qt.AlignRight)
+        main_layout.addWidget(self.version_label)
+        # ---------------------
+
+        self.convert_mat_btn = QtWidgets.QPushButton("Convert materials")
+        self.convert_mat_btn.setAutoDefault(False)
+        self.convert_mat_btn.clicked.connect(self.on_convert_materials_clicked)
+        main_layout.addWidget(self.convert_mat_btn)
+
+        # Buttons
+        self.apply_color_btn = QtWidgets.QPushButton("Apply color correct")
+        self.apply_color_btn.setAutoDefault(False)
+        self.apply_color_btn.clicked.connect(self.on_apply_color_clicked)
+        main_layout.addWidget(self.apply_color_btn)
+
+        self.fetch_color_btn = QtWidgets.QPushButton("Fetch color correct")
+        self.fetch_color_btn.setAutoDefault(False)
+        self.fetch_color_btn.clicked.connect(self.on_fetch_color_clicked)
+        main_layout.addWidget(self.fetch_color_btn)
+
+        self.delete_color_btn = QtWidgets.QPushButton("Delete color correct")
+        self.delete_color_btn.setAutoDefault(False)
+        self.delete_color_btn.clicked.connect(self.on_delete_color_clicked)
+        main_layout.addWidget(self.delete_color_btn)
+
+        # Color controls
+        color_group = QtWidgets.QGroupBox("Color")
+        cl = QtWidgets.QVBoxLayout()
+
+        # Hue
+        hl = QtWidgets.QHBoxLayout()
+        hl.addWidget(QtWidgets.QLabel("Hue Shift"))
+        self.hue_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.hue_slider.setRange(-180, 180)
+        self.hue_slider.valueChanged.connect(self.on_hue_slider_changed)
+        hl.addWidget(self.hue_slider)
+        self.hue_spin = QtWidgets.QDoubleSpinBox()
+        self.hue_spin.setRange(-180.0, 180.0)
+        self.hue_spin.setSingleStep(0.1)
+        self.hue_spin.setDecimals(1)
+        # only update on Enter or focus‐out:
+        self.hue_spin.editingFinished.connect(
+            lambda: self.on_hue_spinbox_changed(self.hue_spin.value())
+        )
+        hl.addWidget(self.hue_spin)
+        cl.addLayout(hl)
+
+        # Saturation
+        sl = QtWidgets.QHBoxLayout()
+        sl.addWidget(QtWidgets.QLabel("Saturation"))
+        self.sat_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.sat_slider.setRange(-100, 100)
+        self.sat_slider.valueChanged.connect(self.on_sat_slider_changed)
+        sl.addWidget(self.sat_slider)
+        self.sat_spin = QtWidgets.QDoubleSpinBox()
+        self.sat_spin.setRange(-100.0, 100.0)
+        self.sat_spin.setSingleStep(0.1)
+        self.sat_spin.setDecimals(1)
+        self.sat_spin.editingFinished.connect(
+            lambda: self.on_sat_spinbox_changed(self.sat_spin.value())
+        )
+        sl.addWidget(self.sat_spin)
+        cl.addLayout(sl)
+
+        # Tint + Strength
+        tl = QtWidgets.QHBoxLayout()
+        tl.addWidget(QtWidgets.QLabel("Hue Tint"))
+        self.tint_button = QtWidgets.QPushButton()
+        self.tint_button.setAutoDefault(False)
+        self.tint_button.setFixedSize(80, 40)
+        self.tint_button.setIconSize(QtCore.QSize(80, 40))
+        self.tint_button.clicked.connect(self.on_tint_button_clicked)
+        self.update_tint_button_color()
+        tl.addWidget(self.tint_button)
+        tl.addWidget(QtWidgets.QLabel("Strength"))
+        self.strength_spin = QtWidgets.QDoubleSpinBox()
+        self.strength_spin.setRange(0.0, 100.0)
+        self.strength_spin.setSingleStep(0.1)
+        self.strength_spin.setDecimals(1)
+        self.strength_spin.editingFinished.connect(
+            lambda: self.on_strength_spinbox_changed(self.strength_spin.value())
+        )
+        tl.addWidget(self.strength_spin)
+        cl.addLayout(tl)
+
+        color_group.setLayout(cl)
+        main_layout.addWidget(color_group)
+
+        # 5-column grid: first column for row labels
+        grid_group = QtWidgets.QGroupBox("Adjustments")
+        grid = QtWidgets.QGridLayout()
+
+        # Make the row‐label column only as wide as needed
+        grid.setColumnStretch(0, 0)
+        grid.setColumnMinimumWidth(0, 15)
+        # Let the spinner columns stretch normally
+        for col in range(1, 5):
+            grid.setColumnStretch(col, 1)
+
+        # Header row
+        grid.addWidget(QtWidgets.QLabel(""), 0, 0)
+        headers = ["RGB", "Gamma/Contrast", "Pivot", "Lift/Offset"]
+        for col, htxt in enumerate(headers):
+            grid.addWidget(QtWidgets.QLabel(htxt), 0, col+1)
+
+        self.rgb_spinners   = []
+        self.gamma_spinners = []
+        self.pivot_spinners = []
+        self.lift_spinners  = []
+
+        # Row-labels for second, third, fourth rows
+        row_labels = ["", "R", "G", "B"]
+
+        for row in range(4):
+            lbl_text = row_labels[row]
+            if lbl_text:
+                lbl = QtWidgets.QLabel(lbl_text)
+                lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                grid.addWidget(lbl, row+1, 0)
+
+            # RGB spinner at column 1
+            rgb_sb = QtWidgets.QDoubleSpinBox()
+            rgb_sb.setRange(-99999.0, 99999.0)
+            rgb_sb.setSingleStep(0.1)
+            rgb_sb.setDecimals(1)
+            rgb_sb.editingFinished.connect(lambda r=row, sb=rgb_sb: self.on_rgb_changed(r, sb.value()))
+            grid.addWidget(rgb_sb, row+1, 1)
+            self.rgb_spinners.append(rgb_sb)
+
+            # Gamma spinner at column 2
+            gamma_sb = QtWidgets.QDoubleSpinBox()
+            gamma_sb.setRange(-99999.0, 99999.0)
+            gamma_sb.setSingleStep(0.1)
+            gamma_sb.setDecimals(1)
+            gamma_sb.editingFinished.connect(lambda r=row, sb=gamma_sb: self.on_gamma_changed(r, sb.value()))
+            grid.addWidget(gamma_sb, row+1, 2)
+            self.gamma_spinners.append(gamma_sb)
+
+            # Pivot spinner at column 3
+            pivot_sb = QtWidgets.QDoubleSpinBox()
+            pivot_sb.setRange(-99999.0, 99999.0)
+            pivot_sb.setSingleStep(0.1)
+            pivot_sb.setDecimals(1)
+            pivot_sb.editingFinished.connect(lambda r=row, sb=pivot_sb: self.on_pivot_changed(r, sb.value()))
+            grid.addWidget(pivot_sb, row+1, 3)
+            self.pivot_spinners.append(pivot_sb)
+
+            # Lift spinner at column 4
+            lift_sb = QtWidgets.QDoubleSpinBox()
+            lift_sb.setRange(-99999.0, 99999.0)
+            lift_sb.setSingleStep(0.1)
+            lift_sb.setDecimals(1)
+            lift_sb.editingFinished.connect(lambda r=row, sb=lift_sb: self.on_lift_changed(r, sb.value()))
+            grid.addWidget(lift_sb, row+1, 4)
+            self.lift_spinners.append(lift_sb)
+
+        grid_group.setLayout(grid)
+        main_layout.addWidget(grid_group)
+        main_layout.addStretch()
+
+        self.setLayout(main_layout)
+        self.resize(400, 400)
+
+    def on_convert_materials_clicked(self):
+        if len(rt.selection) == 0:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "No Selection",
+                "Please select at least one object before deleting color correction."
+            )
+            return
+        ms_script = r'''
+(
+    fn checkUnique matList3 m =
+    (
+        for n in matList3 do (
+            if n.name == m.name then return false
+        )
+        return true
+    )
+
+    fn convertPhysFN m =
+    (
+        if m.base_color_map != undefined then
+        (
+            mBaseColor = m.base_color_map
+            mName      = m.name
+            mMat       = CoronaLegacyMtl showInViewport:true
+            mMat.name  = mName
+            m = mMat
+            m.texmapDiffuse = mBaseColor
+        )
+        else
+        (
+            mBaseColor = m.Base_Color
+            mName      = m.name
+            mMat       = CoronaLegacyMtl showInViewport:true
+            mMat.name  = mName
+            m = mMat
+            m.colorDiffuse = mBaseColor
+        )
+        if findString mName "Lasi" != undefined or findString mName "Glass" != undefined then
+        (
+            m.levelReflect = 1.0
+            m.levelRefract = 1.0
+        )
+        return m
+    )
+
+    fn doMatList objlist matList2 =
+    (
+        for m in objlist do
+        (
+            if classOf m.mat == PhysicalMaterial then
+            (
+                convertedMat = convertPhysFN m.mat
+                if checkUnique matList2 convertedMat then
+                    matList2 = append matList2 convertedMat
+            )
+            if classOf m.mat == multiSubMaterial then
+            (
+                for i = 1 to getNumSubMtls m.mat do
+                (
+                    subM = getSubMtl m.mat i
+                    if classOf subM == PhysicalMaterial then
+                    (
+                        subM = convertPhysFN subM
+                        if checkUnique matList2 subM then
+                            matList2 = append matList2 subM
+                    )
+                )
+            )
+        )
+        return matList2
+    )
+
+    fn assingMaterials matList objList =
+    (
+        for m in objList do
+        (
+            if classOf m.mat == PhysicalMaterial then
+                for i in matList where m.mat.name == i.name do
+                    m.mat = i
+
+            if classOf m.mat == multiSubMaterial then
+                for s = 1 to getNumSubMtls m.mat do
+                (
+                    subM = getSubMtl m.mat s
+                    if classOf subM == PhysicalMaterial then
+                        for i in matList where subM.name == i.name do
+                            setSubMtl m.mat s i
+                )
+        )
+    )
+
+    if queryBox "Changing selected PhysicalMtl to CoronaLegacyMtl?" title:"Physical2CoronaLegacy" beep:false then
+    (
+        CurSelection = getCurrentSelection()
+        matList      = doMatList CurSelection #()
+        assingMaterials matList CurSelection
+
+        for i in matList do print i.name
+        messageBox ("Converted total: " + (matList.count as string) + " materials") title:"Conversion Successful"
+    )
+)
+'''
+        rt.execute(ms_script)
+
+    def _get_all_materials_from_selection(self):
+        """
+        Collects all unique materials from the current selection, handling 
+        Multi/Sub-Object materials recursively.
+        """
+        all_materials = []
+        processed_materials = set()
+
+        def _collect_recursive(material):
+            if not material or material in processed_materials:
+                return
+
+            # Add the material itself (could be a standard material or a multi-material container)
+            all_materials.append(material)
+            processed_materials.add(material)
+
+            # If it is a multi-material, recurse into its sub-materials
+            if rt.isKindOf(material, rt.Multimaterial):
+                for i in range(1, rt.getNumSubMtls(material) + 1):
+                    sub_mat = rt.getSubMtl(material, i)
+                    _collect_recursive(sub_mat)
+
+        for obj in rt.selection:
+            if obj.material:
+                _collect_recursive(obj.material)
+        
+        return all_materials
+
+    def addColorNode(self):
+        self.ccNodes = []
+        self.ctrlNodes = []
+
+        RGB_Gain_Ctrl = rt.Bezier_Float(); RGB_Gain_Ctrl.name = "RGBGainCtrl"
+        R_Gain_Ctrl   = rt.Bezier_Float(); R_Gain_Ctrl.name = "RGainCtrl"
+        G_Gain_Ctrl   = rt.Bezier_Float(); G_Gain_Ctrl.name = "GGainCtrl"
+        B_Gain_Ctrl   = rt.Bezier_Float(); B_Gain_Ctrl.name = "BGainCtrl"
+        for ctrl,val in [(RGB_Gain_Ctrl,100),(R_Gain_Ctrl,100),(G_Gain_Ctrl,100),(B_Gain_Ctrl,100)]:
+            ctrl.value = float(val); self.ctrlNodes.append(ctrl)
+
+        RGB_Gamma_Ctrl = rt.Bezier_Float(); RGB_Gamma_Ctrl.name = "RGBGammaCtrl"
+        R_Gamma_Ctrl   = rt.Bezier_Float(); R_Gamma_Ctrl.name = "RGammaCtrl"
+        G_Gamma_Ctrl   = rt.Bezier_Float(); G_Gamma_Ctrl.name = "GGammaCtrl"
+        B_Gamma_Ctrl   = rt.Bezier_Float(); B_Gamma_Ctrl.name = "BGammaCtrl"
+        for ctrl,val in [(RGB_Gamma_Ctrl,1.0),(R_Gamma_Ctrl,1.0),(G_Gamma_Ctrl,1.0),(B_Gamma_Ctrl,1.0)]:
+            ctrl.value = val; self.ctrlNodes.append(ctrl)
+
+        RGB_Pivot_Ctrl = rt.Bezier_Float(); RGB_Pivot_Ctrl.name = "RGBPivotCtrl"
+        R_Pivot_Ctrl   = rt.Bezier_Float(); R_Pivot_Ctrl.name = "RPivotCtrl"
+        G_Pivot_Ctrl   = rt.Bezier_Float(); G_Pivot_Ctrl.name = "GPivotCtrl"
+        B_Pivot_Ctrl   = rt.Bezier_Float(); B_Pivot_Ctrl.name = "BPivotCtrl"
+        for ctrl,val in [(RGB_Pivot_Ctrl,1.0),(R_Pivot_Ctrl,1.0),(G_Pivot_Ctrl,1.0),(B_Pivot_Ctrl,1.0)]:
+            ctrl.value = val; self.ctrlNodes.append(ctrl)
+
+        RGB_Lift_Ctrl  = rt.Bezier_Float(); RGB_Lift_Ctrl.name = "RGBLiftCtrl"
+        R_Lift_Ctrl    = rt.Bezier_Float(); R_Lift_Ctrl.name = "RLiftCtrl"
+        G_Lift_Ctrl    = rt.Bezier_Float(); G_Lift_Ctrl.name = "GLiftCtrl"
+        B_Lift_Ctrl    = rt.Bezier_Float(); B_Lift_Ctrl.name = "BLiftCtrl"
+        for ctrl,val in [(RGB_Lift_Ctrl,0.0),(R_Lift_Ctrl,0.0),(G_Lift_Ctrl,0.0),(B_Lift_Ctrl,0.0)]:
+            ctrl.value = val; self.ctrlNodes.append(ctrl)
+
+        R_Enable_Ctrl = rt.Boolean_Float(); R_Enable_Ctrl.name = "REnableCtrl"
+        G_Enable_Ctrl = rt.Boolean_Float(); G_Enable_Ctrl.name = "GEnableCtrl"
+        B_Enable_Ctrl = rt.Boolean_Float(); B_Enable_Ctrl.name = "BEnableCtrl"
+        for ctrl in (R_Enable_Ctrl, G_Enable_Ctrl, B_Enable_Ctrl):
+            ctrl.value = 1; self.ctrlNodes.append(ctrl)
+
+        HueShift_Ctrl     = rt.Bezier_Float(); HueShift_Ctrl.name = "HueShiftCtrl"
+        Saturation_Ctrl   = rt.Bezier_Float(); Saturation_Ctrl.name = "SaturationCtrl"
+        Tint_Ctrl         = rt.Bezier_RGBA();  Tint_Ctrl.name = "TintCtrl"
+        TintStrength_Ctrl = rt.Bezier_Float(); TintStrength_Ctrl.name = "TintStrengthCtrl"
+        HueShift_Ctrl.value = 0.0
+        Saturation_Ctrl.value = 0.0
+        Tint_Ctrl.value = rt.Point4(0,0,0,1)
+        TintStrength_Ctrl.value = 0.0
+        for ctrl in (HueShift_Ctrl, Saturation_Ctrl, Tint_Ctrl, TintStrength_Ctrl):
+            self.ctrlNodes.append(ctrl)
+
+        self.hue_ctrl = HueShift_Ctrl
+        self.sat_ctrl = Saturation_Ctrl
+        self.tint_ctrl = Tint_Ctrl
+        self.strength_ctrl = TintStrength_Ctrl
+        self.gain_ctrls   = [RGB_Gain_Ctrl, R_Gain_Ctrl, G_Gain_Ctrl, B_Gain_Ctrl]
+        self.gamma_ctrls  = [RGB_Gamma_Ctrl, R_Gamma_Ctrl, G_Gamma_Ctrl, B_Gamma_Ctrl]
+        self.pivot_ctrls  = [RGB_Pivot_Ctrl, R_Pivot_Ctrl, G_Pivot_Ctrl, B_Pivot_Ctrl]
+        self.lift_ctrls   = [RGB_Lift_Ctrl, R_Lift_Ctrl, G_Lift_Ctrl, B_Lift_Ctrl]
+
+        # Use helper to get all materials recursively
+        all_materials = self._get_all_materials_from_selection()
+
+        # Create color-correction nodes on applicable materials
+        for mat in all_materials:
+            if rt.hasProperty(mat, "texmapDiffuse"):
+                diff = mat.texmapDiffuse
+                if rt.classOf(diff) != rt.Color_Correction:
+                    cc = rt.ColorCorrection()
+                    cc.Map = diff
+                    cc.lightnessMode = 1
+                    mat.texmapDiffuse = cc
+                    self.ccNodes.append(cc)
+
+        props = [
+            ("hueShift", HueShift_Ctrl), ("saturation", Saturation_Ctrl),
+            ("tint", Tint_Ctrl), ("tintStrength", TintStrength_Ctrl),
+            ("enableR", R_Enable_Ctrl), ("enableG", G_Enable_Ctrl), ("enableB", B_Enable_Ctrl),
+            ("gainRGB", RGB_Gain_Ctrl), ("gainR", R_Gain_Ctrl), ("gainG", G_Gain_Ctrl), ("gainB", B_Gain_Ctrl),
+            ("gammaRGB", RGB_Gamma_Ctrl), ("gammaR", R_Gamma_Ctrl), ("gammaG", G_Gamma_Ctrl), ("gammaB", B_Gamma_Ctrl),
+            ("pivotRGB", RGB_Pivot_Ctrl), ("pivotR", R_Pivot_Ctrl), ("pivotG", G_Pivot_Ctrl), ("pivotB", B_Pivot_Ctrl),
+            ("liftRGB", RGB_Lift_Ctrl), ("liftR", R_Lift_Ctrl), ("liftG", G_Lift_Ctrl), ("liftB", B_Lift_Ctrl),
+        ]
+        for cc in self.ccNodes:
+            for name, ctrl in props:
+                rt.setPropertyController(cc, name, ctrl)
+
+    def update_tint_button_color(self):
+        self.tint_button.setStyleSheet(f"background-color: {self.current_color.name()};")
+
+    def on_apply_color_clicked(self):
+        if len(rt.selection) == 0:
+            QtWidgets.QMessageBox.warning(self, "No Selection", "Please select at least one object.")
+            return
+
+        # Get all materials and sub-materials from the selection recursively
+        all_materials = self._get_all_materials_from_selection()
+
+        # Find any renderable materials that are not CoronaLegacyMtl
+        # We exclude MultiMaterial itself as it's a container
+        invalid_materials = [
+            mat for mat in all_materials
+            if rt.classOf(mat) != rt.CoronaLegacyMtl and not rt.isKindOf(mat, rt.Multimaterial)
+        ]
+
+        # If any invalid materials are found, prompt the user to convert them
+        if invalid_materials:
+            resp = QtWidgets.QMessageBox.question(
+                self, 
+                "Convert Materials?",
+                "Selection contains materials that are not CoronaLegacyMtl.\n\n"
+                "Would you like to attempt to convert them?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+            )
+            if resp == QtWidgets.QMessageBox.Yes:
+                self.on_convert_materials_clicked()
+            else:
+                return  # User chose not to convert, so we abort
+
+        # Proceed with adding the color correction nodes
+        self.addColorNode()
+
+    def on_fetch_color_clicked(self):
+        if len(rt.selection) == 0:
+            QtWidgets.QMessageBox.warning(self, "No Selection", "Please select at least one object.")
+            return
+
+        self._discover_controllers()
+
+        if not self.hue_ctrl and not self.gain_ctrls:
+            resp = QtWidgets.QMessageBox.question(
+                self, 'No Color Correction',
+                'No color correct node found. Apply color correct?',
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+            )
+            if resp == QtWidgets.QMessageBox.Yes:
+                self.addColorNode()
+            return
+
+        if self.hue_ctrl:
+            self.hue_spin.setValue(self.hue_ctrl.value)
+            self.hue_slider.setValue(int(self.hue_ctrl.value))
+        if self.sat_ctrl:
+            self.sat_spin.setValue(self.sat_ctrl.value)
+            self.sat_slider.setValue(int(self.sat_ctrl.value))
+        if self.strength_ctrl:
+            self.strength_spin.setValue(self.strength_ctrl.value)
+        if self.tint_ctrl:
+            t = self.tint_ctrl.value
+            self.current_color = QtGui.QColor.fromRgbF(t.x, t.y, t.z, t.w)
+            self.update_tint_button_color()
+
+        for i, sb in enumerate(self.rgb_spinners): sb.setValue(self.gain_ctrls[i].value)
+        for i, sb in enumerate(self.gamma_spinners): sb.setValue(self.gamma_ctrls[i].value)
+        for i, sb in enumerate(self.pivot_spinners): sb.setValue(self.pivot_ctrls[i].value)
+        for i, sb in enumerate(self.lift_spinners): sb.setValue(self.lift_ctrls[i].value)
+
+    def on_delete_color_clicked(self):
+        if len(rt.selection) == 0:
+            QtWidgets.QMessageBox.warning(self, "No Selection", "Please select at least one object.")
+            return
+            
+        # Use helper to get all materials recursively
+        all_materials = self._get_all_materials_from_selection()
+        for m in all_materials:
+            if rt.hasProperty(m, 'texmapDiffuse'):
+                cc_node = m.texmapDiffuse
+                if cc_node and rt.classOf(cc_node) == rt.Color_Correction:
+                    orig_map = cc_node.Map
+                    m.texmapDiffuse = orig_map
+        
+        self.hue_ctrl = self.sat_ctrl = self.tint_ctrl = self.strength_ctrl = None
+        self.gain_ctrls = []; self.gamma_ctrls = []; self.pivot_ctrls = []; self.lift_ctrls = []
+        self.hue_spin.setValue(0.0); self.hue_slider.setValue(0)
+        self.sat_spin.setValue(0.0); self.sat_slider.setValue(0)
+        self.strength_spin.setValue(0.0)
+        for group in [self.rgb_spinners, self.gamma_spinners, self.pivot_spinners, self.lift_spinners]:
+            for sb in group:
+                sb.setValue(0.0)
+
+    def _discover_controllers(self):
+        self.hue_ctrl = self.sat_ctrl = self.tint_ctrl = self.strength_ctrl = None
+        self.gain_ctrls = []; self.gamma_ctrls = []; self.pivot_ctrls = []; self.lift_ctrls = []
+        if not rt.selection: return
+        
+        # Use helper to get all materials recursively
+        all_materials = self._get_all_materials_from_selection()
+
+        # Find the first material that has a color correction node to populate the UI
+        for m in all_materials:
+            if rt.hasProperty(m, 'texmapDiffuse'):
+                cc = m.texmapDiffuse
+                if cc and rt.classOf(cc) == rt.Color_Correction:
+                    self.hue_ctrl = rt.getPropertyController(cc, 'hueShift')
+                    self.sat_ctrl = rt.getPropertyController(cc, 'saturation')
+                    self.tint_ctrl = rt.getPropertyController(cc, 'tint')
+                    self.strength_ctrl = rt.getPropertyController(cc, 'tintStrength')
+                    prop_map = {
+                        'gain': self.gain_ctrls, 'gamma': self.gamma_ctrls,
+                        'pivot': self.pivot_ctrls, 'lift': self.lift_ctrls
+                    }
+                    for prefix, dest_list in prop_map.items():
+                        for channel in ['RGB', 'R', 'G', 'B']:
+                            dest_list.append(rt.getPropertyController(cc, f"{prefix}{channel}"))
+                    return # Exit after finding the first one
+
+    def on_hue_slider_changed(self, v):
+        self.hue_spin.setValue(float(v))
+        if self.hue_ctrl: self.hue_ctrl.value = float(v); rt.redrawViews()
+
+    def on_hue_spinbox_changed(self, v):
+        self.hue_slider.setValue(int(v))
+        if self.hue_ctrl: self.hue_ctrl.value = float(v); rt.redrawViews()
+
+    def on_sat_slider_changed(self, v):
+        self.sat_spin.setValue(float(v))
+        if self.sat_ctrl: self.sat_ctrl.value = float(v); rt.redrawViews()
+
+    def on_sat_spinbox_changed(self, v):
+        self.sat_slider.setValue(int(v))
+        if self.sat_ctrl: self.sat_ctrl.value = float(v); rt.redrawViews()
+
+    def update_tint_button_color(self):
+        size = self.tint_button.iconSize()
+        pix = QtGui.QPixmap(size)
+        pix.fill(self.current_color)
+        self.tint_button.setIcon(QtGui.QIcon(pix))
+
+    def on_tint_button_clicked(self):
+        dlg = QtWidgets.QColorDialog(self.current_color, self)
+        dlg.setOption(QtWidgets.QColorDialog.ShowAlphaChannel, True)
+        dlg.setWindowFlags(dlg.windowFlags() | QtCore.Qt.Tool)
+
+        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+            color = dlg.selectedColor()
+            if color.isValid():
+                self.current_color = color
+                self.update_tint_button_color()
+                if self.tint_ctrl:
+                    rgba = rt.Point4(color.redF(), color.greenF(), color.blueF(), color.alphaF())
+                    self.tint_ctrl.value = rgba
+                    rt.redrawViews()
+
+    def on_strength_spinbox_changed(self, v):
+        if self.strength_ctrl: self.strength_ctrl.value = float(v); rt.redrawViews()
+
+    def _update_grid_controller(self, ctrl_list, row, v):
+        try:
+            ctrl = ctrl_list[row]
+            if ctrl is not None:
+                ctrl.value = float(v)
+                rt.redrawViews()
+        except (IndexError, TypeError):
+            pass
+            
+    def on_rgb_changed(self, row, v): self._update_grid_controller(self.gain_ctrls, row, v)
+    def on_gamma_changed(self, row, v): self._update_grid_controller(self.gamma_ctrls, row, v)
+    def on_pivot_changed(self, row, v): self._update_grid_controller(self.pivot_ctrls, row, v)
+    def on_lift_changed(self, row, v): self._update_grid_controller(self.lift_ctrls, row, v)
+
+def main():
+    main_window = qtmax.GetQMaxMainWindow()
+    if main_window:
+        object_name = "PyMaxColorCorrectorInstance"
+        for widget in main_window.findChildren(QtWidgets.QDialog):
+            if widget.objectName() == object_name:
+                widget.close()
+                widget.deleteLater()
+                break
+
+    w = PyMaxDockWidget(parent=main_window)
+    w.setObjectName(object_name)
+    w.show()
+
+if __name__ == '__main__':
+    main()
