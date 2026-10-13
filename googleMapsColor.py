@@ -9,7 +9,7 @@ except ImportError:
 import qtmax
 from pymxs import runtime as rt
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 class PyMaxDockWidget(QtWidgets.QDialog):
     def __init__(self, parent=None):
